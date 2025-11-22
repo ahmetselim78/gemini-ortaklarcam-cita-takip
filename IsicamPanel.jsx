@@ -1,0 +1,519 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getFirestore, doc, onSnapshot, setDoc } from 'firebase/firestore';
+import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+import { Settings, Edit, Trash2, Plus, Volume2, Save, Monitor, Tablet, Sparkles, Wrench, X, Send, Loader2, FileText } from 'lucide-react';
+
+// --- Firebase Yapılandırması ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// --- Gemini API Yapılandırması ---
+const apiKey = ""; // API anahtarı runtime ortamından otomatik alınır.
+const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+
+// --- Ses Dosyası (Zil Sesi) ---
+const ALERT_SOUND_URL = "https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3";
+
+export default function IsicamPanel() {
+  const [user, setUser] = useState(null);
+  const [view, setView] = useState('home'); // 'home', 'sender', 'receiver'
+  
+  // Uygulama verileri
+  const [currentSize, setCurrentSize] = useState("---");
+  const [lastUpdated, setLastUpdated] = useState(null);
+  
+  // Oturum Geçmişi (Raporlama için yerel hafıza)
+  const [sessionHistory, setSessionHistory] = useState([]);
+  
+  // Ayarlar (Butonlar)
+  const [buttons, setButtons] = useState(["20 mm", "24 mm", "12 mm", "16 mm"]);
+  
+  // Ses referansı
+  const audioRef = useRef(new Audio(ALERT_SOUND_URL));
+
+  // --- 1. Kimlik Doğrulama ---
+  useEffect(() => {
+    const initAuth = async () => {
+        try {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+                await signInAnonymously(auth);
+            }
+        } catch (err) {
+            console.error("Auth Hatası:", err);
+        }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, (u) => setUser(u));
+    return () => unsubscribe();
+  }, []);
+
+  // --- 2. Veri Senkronizasyonu (Firestore) ---
+  useEffect(() => {
+    if (!user) return;
+
+    const statusRef = doc(db, 'artifacts', appId, 'public', 'data', 'production_line', 'status');
+
+    const unsubscribeStatus = onSnapshot(statusRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        
+        // Ses Çalma Kontrolü
+        if (data.timestamp && data.timestamp !== lastUpdated && view === 'receiver') {
+             playSound();
+        }
+
+        let safeSize = "---";
+        if (data.currentSize !== undefined && data.currentSize !== null) {
+            if (typeof data.currentSize === 'object') {
+                safeSize = "Hata"; 
+            } else {
+                safeSize = String(data.currentSize);
+            }
+        }
+        
+        setCurrentSize(safeSize);
+        setLastUpdated(data.timestamp);
+      }
+    }, (error) => console.error("Status Okuma Hatası:", error));
+
+    // Buton Ayarları
+    const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'production_line', 'config');
+    const unsubscribeConfig = onSnapshot(configRef, (docSnap) => {
+        if(docSnap.exists()) {
+            const data = docSnap.data();
+            if (Array.isArray(data.buttons)) {
+                setButtons(data.buttons);
+            }
+        }
+    }, (error) => console.error("Config Okuma Hatası:", error));
+
+    return () => {
+        unsubscribeStatus();
+        unsubscribeConfig();
+    };
+  }, [user, view, lastUpdated]); 
+
+  // --- Fonksiyonlar ---
+
+  const playSound = () => {
+    if (audioRef.current) {
+        audioRef.current.currentTime = 0;
+        audioRef.current.play().catch(e => console.log("Ses çalma izni bekleniyor...", e));
+    }
+  };
+
+  const sendSignal = async (size) => {
+    if (!user) return;
+    const statusRef = doc(db, 'artifacts', appId, 'public', 'data', 'production_line', 'status');
+    
+    // Yerel geçmişe ekle (Rapor için)
+    const newEntry = { size: String(size), timestamp: new Date().toLocaleTimeString() };
+    setSessionHistory(prev => [...prev, newEntry]);
+
+    try {
+      await setDoc(statusRef, {
+        currentSize: String(size),
+        timestamp: Date.now(),
+        senderId: user.uid
+      });
+    } catch (error) {
+      console.error("Sinyal gönderme hatası:", error);
+    }
+  };
+
+  const updateButtons = async (newButtons) => {
+      if(!user) return;
+      const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'production_line', 'config');
+      await setDoc(configRef, { buttons: newButtons });
+  };
+
+  // --- Alt Bileşenler ---
+
+  if (view === 'home') {
+    return (
+      <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center p-4">
+        <h1 className="text-4xl font-bold mb-2 text-center text-blue-400">Isıcam Üretim Hattı</h1>
+        <p className="text-slate-400 mb-12 text-center">Lütfen istasyonunuzu seçin</p>
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 w-full max-w-4xl">
+          <button 
+            onClick={() => setView('sender')}
+            className="group relative bg-slate-800 hover:bg-blue-600 transition-all p-10 rounded-2xl border-2 border-slate-700 hover:border-blue-400 flex flex-col items-center gap-4"
+          >
+            <Tablet size={64} className="text-blue-400 group-hover:text-white" />
+            <div className="text-center">
+              <h2 className="text-2xl font-bold">Çıta İstasyonu</h2>
+              <p className="text-sm text-slate-400 group-hover:text-blue-100">Ölçü Seçimi & Raporlama</p>
+            </div>
+          </button>
+
+          <button 
+            onClick={() => setView('receiver')}
+            className="group relative bg-slate-800 hover:bg-green-600 transition-all p-10 rounded-2xl border-2 border-slate-700 hover:border-green-400 flex flex-col items-center gap-4"
+          >
+            <Monitor size={64} className="text-green-400 group-hover:text-white" />
+            <div className="text-center">
+              <h2 className="text-2xl font-bold">Macun Robotu</h2>
+              <p className="text-sm text-slate-400 group-hover:text-green-100">Görsel Ekran & Bakım Asistanı</p>
+            </div>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (view === 'receiver') {
+    return (
+      <ReceiverView 
+        currentSize={currentSize} 
+        lastUpdated={lastUpdated} 
+        playSound={playSound} 
+        goHome={() => setView('home')} 
+      />
+    );
+  }
+
+  return (
+    <SenderView 
+        currentSize={currentSize} 
+        sendSignal={sendSignal} 
+        buttons={buttons} 
+        setButtons={updateButtons}
+        goHome={() => setView('home')}
+        sessionHistory={sessionHistory}
+    />
+  );
+}
+
+// --- AI Yardımcı Fonksiyon ---
+async function callGeminiAPI(prompt, systemInstruction = "") {
+    try {
+        const payload = {
+            contents: [{ parts: [{ text: prompt }] }],
+            systemInstruction: { parts: [{ text: systemInstruction }] }
+        };
+
+        const response = await fetch(GEMINI_API_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) throw new Error('API Call Failed');
+        
+        const data = await response.json();
+        return data.candidates?.[0]?.content?.parts?.[0]?.text || "Yanıt alınamadı.";
+    } catch (error) {
+        console.error("Gemini Error:", error);
+        return "Üzgünüm, AI servisine şu an ulaşılamıyor.";
+    }
+}
+
+// --- Receiver (Macun Robotu) Bileşeni ---
+function ReceiverView({ currentSize, lastUpdated, playSound, goHome }) {
+    const [showAssistant, setShowAssistant] = useState(false);
+    const [query, setQuery] = useState("");
+    const [response, setResponse] = useState("");
+    const [loading, setLoading] = useState(false);
+
+    const handleAskAssistant = async (e) => {
+        e.preventDefault();
+        if (!query.trim()) return;
+        setLoading(true);
+        setResponse("");
+        
+        const systemPrompt = "Sen Isıcam (Yalıtımlı Cam) üretim hatları, tiyokol/butil macun robotları ve cam kesim masaları konusunda uzman kıdemli bir bakım teknisyenisin. Kullanıcının sorusuna kısa, net, endüstriyel güvenlik kurallarına uygun ve çözüm odaklı Türkçe yanıtlar ver. Maddeler halinde anlat.";
+        
+        const aiResponse = await callGeminiAPI(query, systemPrompt);
+        setResponse(aiResponse);
+        setLoading(false);
+    };
+
+    return (
+        <div className="min-h-screen bg-black text-white flex flex-col relative overflow-hidden">
+            {/* Üst Bilgi Barı */}
+            <div className="absolute top-0 left-0 w-full p-4 flex justify-between items-center z-10 bg-black/50 backdrop-blur-sm">
+                <div className="flex items-center gap-2 text-slate-400">
+                    <Monitor size={20} />
+                    <span>Macun İstasyonu Ekranı</span>
+                </div>
+                <div className="flex gap-2">
+                    <button onClick={() => setShowAssistant(true)} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 px-4 py-1 rounded text-sm transition-colors">
+                        <Wrench size={16} />
+                        <span>AI Asistan</span>
+                    </button>
+                    <button onClick={goHome} className="text-sm bg-slate-800 px-3 py-1 rounded hover:bg-slate-700">
+                        Çıkış
+                    </button>
+                </div>
+            </div>
+
+            {/* Ana Gösterge */}
+            <div className="flex-1 flex flex-col items-center justify-center animate-in fade-in duration-700">
+                <p className="text-slate-500 text-2xl mb-4 uppercase tracking-widest">Aktif Ara Boşluk</p>
+                <div className={`font-black text-[15vw] leading-none tracking-tighter ${lastUpdated && (Date.now() - lastUpdated < 5000) ? 'text-yellow-400 animate-pulse' : 'text-white'}`}>
+                    {typeof currentSize === 'string' ? currentSize : "---"}
+                </div>
+                <p className="text-slate-600 mt-8">
+                    Son Güncelleme: {lastUpdated ? new Date(lastUpdated).toLocaleTimeString() : 'Bekleniyor...'}
+                </p>
+            </div>
+
+            {/* AI Asistan Modalı */}
+            {showAssistant && (
+                <div className="absolute inset-0 z-50 bg-black/90 flex items-center justify-center p-4">
+                    <div className="bg-slate-900 border border-slate-700 w-full max-w-2xl rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+                        <div className="p-4 border-b border-slate-700 flex justify-between items-center bg-indigo-900/30">
+                            <div className="flex items-center gap-2 text-indigo-400">
+                                <Sparkles size={20} />
+                                <h3 className="font-bold text-lg">AI Bakım Uzmanı</h3>
+                            </div>
+                            <button onClick={() => setShowAssistant(false)} className="text-slate-400 hover:text-white">
+                                <X size={24} />
+                            </button>
+                        </div>
+                        
+                        <div className="flex-1 p-6 overflow-y-auto">
+                            {!response && !loading && (
+                                <div className="text-center text-slate-500 mt-10">
+                                    <Wrench size={48} className="mx-auto mb-4 opacity-50" />
+                                    <p>Robot hatası, macun kalitesi veya mekanik sorunlar hakkında soru sorun.</p>
+                                    <p className="text-sm mt-2">Örn: "Robot köşelerde macunu taşırdı", "Butil çok sıcak geliyor"</p>
+                                </div>
+                            )}
+                            
+                            {loading && (
+                                <div className="flex flex-col items-center justify-center h-40 text-indigo-400 gap-3">
+                                    <Loader2 size={40} className="animate-spin" />
+                                    <p>Teknik veritabanı taranıyor...</p>
+                                </div>
+                            )}
+
+                            {response && (
+                                <div className="bg-slate-800 p-4 rounded-lg border border-slate-700 text-slate-200 whitespace-pre-wrap leading-relaxed">
+                                    {response}
+                                </div>
+                            )}
+                        </div>
+
+                        <form onSubmit={handleAskAssistant} className="p-4 bg-slate-800 border-t border-slate-700 flex gap-2">
+                            <input 
+                                type="text" 
+                                value={query}
+                                onChange={(e) => setQuery(e.target.value)}
+                                placeholder="Sorununuzu buraya yazın..." 
+                                className="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-indigo-500"
+                            />
+                            <button type="submit" disabled={loading || !query.trim()} className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white px-6 rounded-lg font-medium flex items-center gap-2">
+                                <Send size={18} />
+                                Sor
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* Ses Test Butonu */}
+            <div className="absolute bottom-4 right-4">
+                <button onClick={playSound} className="bg-slate-800 p-3 rounded-full hover:bg-slate-700 text-slate-400" title="Sesi Test Et">
+                    <Volume2 size={24} />
+                </button>
+            </div>
+        </div>
+    );
+}
+
+// --- Sender (Çıta İstasyonu) Bileşeni ---
+function SenderView({ currentSize, sendSignal, buttons, setButtons, goHome, sessionHistory }) {
+    const [isEditing, setIsEditing] = useState(false);
+    const [newBtnVal, setNewBtnVal] = useState("");
+    
+    // Raporlama State'leri
+    const [showReportModal, setShowReportModal] = useState(false);
+    const [reportText, setReportText] = useState("");
+    const [reportLoading, setReportLoading] = useState(false);
+
+    const handleAdd = (e) => {
+        e.preventDefault();
+        if(newBtnVal.trim()) {
+            const updatedList = [...buttons, newBtnVal.trim()];
+            setButtons(updatedList);
+            setNewBtnVal("");
+        }
+    };
+
+    const handleRemove = (index) => {
+        const newBtns = buttons.filter((_, i) => i !== index);
+        setButtons(newBtns);
+    };
+
+    const generateShiftReport = async () => {
+        setShowReportModal(true);
+        setReportLoading(true);
+        
+        // Geçmiş verisini metne dönüştür
+        const historyText = sessionHistory.length > 0 
+            ? JSON.stringify(sessionHistory) 
+            : "Bu oturumda henüz veri girişi yapılmadı.";
+
+        const prompt = `Aşağıdaki JSON verisi bir Isıcam üretim hattında gönderilen cam çıta ölçülerini ve zamanlarını içerir. 
+        Bu verileri analiz et ve vardiya amiri için Türkçe bir 'Vardiya Üretim Özeti' yaz.
+        
+        Raporda şunlar olsun:
+        1. Toplam kaç adet işlem yapıldı?
+        2. En çok hangi ölçü (mm) kullanıldı?
+        3. Üretim temposu hakkında kısa bir yorum.
+        4. Maddeler halinde özetle.
+
+        Veri: ${historyText}`;
+
+        const aiResponse = await callGeminiAPI(prompt);
+        setReportText(aiResponse);
+        setReportLoading(false);
+    };
+
+    return (
+        <div className="min-h-screen bg-slate-100 flex flex-col">
+            {/* Header */}
+            <header className="bg-white shadow-sm p-4 flex flex-wrap gap-4 justify-between items-center">
+                <div className="flex items-center gap-3">
+                    <button onClick={goHome} className="p-2 hover:bg-slate-100 rounded-full">
+                        <Settings size={24} className="text-slate-600" />
+                    </button>
+                    <h1 className="font-bold text-xl text-slate-800">Çıta Kontrol Paneli</h1>
+                </div>
+                
+                <div className="flex items-center gap-4 ml-auto">
+                     <button 
+                        onClick={generateShiftReport}
+                        className="hidden md:flex items-center gap-2 bg-purple-100 text-purple-700 px-4 py-2 rounded-lg hover:bg-purple-200 transition-colors border border-purple-200"
+                    >
+                        <Sparkles size={18} />
+                        <span className="font-medium">AI Vardiya Özeti</span>
+                    </button>
+
+                    <div className="text-right hidden sm:block border-l pl-4 border-slate-200">
+                        <p className="text-xs text-slate-500">Şu Anki Seçim</p>
+                        <p className="font-bold text-blue-600 text-lg">
+                           {typeof currentSize === 'string' ? currentSize : "---"}
+                        </p>
+                    </div>
+                    <button 
+                        onClick={() => setIsEditing(!isEditing)}
+                        className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${isEditing ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}`}
+                    >
+                        {isEditing ? <Save size={18} /> : <Edit size={18} />}
+                        <span className="font-medium">{isEditing ? 'Tamamla' : 'Düzenle'}</span>
+                    </button>
+                </div>
+            </header>
+
+            {/* Grid Alanı */}
+            <main className="flex-1 p-4 max-w-7xl mx-auto w-full">
+                
+                {/* Mobil için Rapor Butonu */}
+                <button 
+                    onClick={generateShiftReport}
+                    className="md:hidden w-full mb-4 flex justify-center items-center gap-2 bg-purple-100 text-purple-700 px-4 py-3 rounded-lg hover:bg-purple-200 transition-colors border border-purple-200"
+                >
+                    <Sparkles size={18} />
+                    <span className="font-medium">AI Vardiya Özeti Oluştur</span>
+                </button>
+
+                {isEditing && (
+                    <div className="mb-6 bg-yellow-50 border-l-4 border-yellow-400 p-4 rounded">
+                        <div className="flex flex-col md:flex-row gap-4 justify-between items-center">
+                            <p className="text-yellow-700">Butonları ekleyip çıkartabilirsiniz.</p>
+                            <form onSubmit={handleAdd} className="flex gap-2 w-full md:w-auto">
+                                <input 
+                                    type="text" 
+                                    placeholder="Örn: 10.5 mm" 
+                                    className="border border-yellow-300 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-yellow-400 w-full"
+                                    value={newBtnVal}
+                                    onChange={(e) => setNewBtnVal(e.target.value)}
+                                />
+                                <button type="submit" className="bg-yellow-500 hover:bg-yellow-600 text-white px-4 py-2 rounded flex items-center gap-1">
+                                    <Plus size={18} /> Ekle
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                )}
+
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 h-full auto-rows-fr">
+                    {buttons.map((btnLabel, index) => (
+                        <div key={index} className="relative group h-40 md:h-52">
+                            <button
+                                onClick={() => !isEditing && sendSignal(btnLabel)}
+                                disabled={isEditing}
+                                className={`w-full h-full rounded-xl shadow-lg text-2xl md:text-4xl font-bold transition-all transform active:scale-95
+                                    ${currentSize === btnLabel 
+                                        ? 'bg-blue-600 text-white ring-4 ring-blue-300 scale-[1.02]' 
+                                        : 'bg-white text-slate-700 hover:bg-blue-50 border-2 border-slate-200'
+                                    }
+                                    ${isEditing ? 'opacity-50 cursor-default' : 'cursor-pointer'}
+                                `}
+                            >
+                                {typeof btnLabel === 'string' ? btnLabel : "Hata"}
+                            </button>
+                            
+                            {isEditing && (
+                                <button 
+                                    onClick={() => handleRemove(index)}
+                                    className="absolute -top-3 -right-3 bg-red-500 text-white p-2 rounded-full shadow-md hover:bg-red-600 transition-colors z-10"
+                                >
+                                    <Trash2 size={20} />
+                                </button>
+                            )}
+                        </div>
+                    ))}
+                </div>
+            </main>
+
+            {/* AI Rapor Modalı */}
+            {showReportModal && (
+                <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg flex flex-col max-h-[80vh]">
+                        <div className="p-5 border-b border-slate-100 flex justify-between items-center bg-purple-50 rounded-t-2xl">
+                            <div className="flex items-center gap-2 text-purple-700">
+                                <FileText size={24} />
+                                <h3 className="font-bold text-xl">Vardiya Üretim Özeti</h3>
+                            </div>
+                            <button onClick={() => setShowReportModal(false)} className="text-slate-400 hover:text-slate-700">
+                                <X size={24} />
+                            </button>
+                        </div>
+                        
+                        <div className="p-6 overflow-y-auto">
+                            {reportLoading ? (
+                                <div className="flex flex-col items-center justify-center py-10 gap-4">
+                                    <Loader2 size={48} className="text-purple-500 animate-spin" />
+                                    <p className="text-slate-500 animate-pulse">Veriler analiz ediliyor...</p>
+                                </div>
+                            ) : (
+                                <div className="prose prose-slate text-slate-700">
+                                    <div className="whitespace-pre-wrap">{reportText}</div>
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="p-4 border-t border-slate-100 bg-slate-50 rounded-b-2xl flex justify-end">
+                            <button 
+                                onClick={() => setShowReportModal(false)}
+                                className="px-6 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-900 font-medium"
+                            >
+                                Kapat
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
